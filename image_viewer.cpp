@@ -66,20 +66,26 @@ bool Image::parseBmp(std::vector<uint8_t> &buff) {
   m_height = height;
 
   m_pixels.reserve(m_width * m_height * 4);
-  int pixelIndex = dataOffset;
   switch (bitsPerPixel) {
   case 24: {
     if (compression == 0) {
-      for (int i = 0; i < width * height; i++) {
-        uint8_t b = buff[pixelIndex++];
-        uint8_t g = buff[pixelIndex++];
-        uint8_t r = buff[pixelIndex++];
-        m_pixels.push_back(255);
-        m_pixels.push_back(r);
-        m_pixels.push_back(g);
-        m_pixels.push_back(b);
+      int paddedRowSz = ((width * 3 + 3) / 4) * 4;
+
+      for (int y = 0; y < height; ++y) {
+        int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
+        for (int x = 0; x < width; ++x) {
+          int pixelIndex = fileIndex + (x * 3);
+          
+          uint8_t b = buff[pixelIndex++];
+          uint8_t g = buff[pixelIndex++];
+          uint8_t r = buff[pixelIndex++];
+
+          m_pixels.push_back(b);
+          m_pixels.push_back(g);
+          m_pixels.push_back(r);
+          m_pixels.push_back(255);
+        } 
       }
-      std::reverse(m_pixels.begin(), m_pixels.end());
     }
 
     break;
