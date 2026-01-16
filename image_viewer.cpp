@@ -105,6 +105,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
       palette.emplace_back(b, g, r);
     }
   }
+  int palettleSz = palette.size();
 
   switch (bitsPerPixel) {
     case 32:
@@ -146,7 +147,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
     }
 
     case 8: {
-      if (palette.size() >= 256) {
+      if (palettleSz >= 256) {
         std::cerr << "Palette too large...\n";
         return false;
       }
@@ -156,7 +157,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
           for (int x = 0; x < width; ++x) {
             int pixelIndex = fileIndex + x;
 
-            if (buff[pixelIndex] >= palette.size()) {
+            if (buff[pixelIndex] >= palettleSz) {
               std::cerr << "Out of bounds color used...\n";
               return false;
             }
@@ -170,7 +171,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
     }
 
     case 4: {
-      if (palette.size() > 16) {
+      if (palettleSz > 16) {
         std::cerr << "Palette too large...\n";
         return false;
       }
@@ -182,7 +183,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
             uint8_t byte = buff[pixelIndex];
 
             int idx1 = (byte >> 4) & ((1 << 4) - 1);
-            if (idx1 < palette.size()) {
+            if (idx1 < palettleSz) {
               pushBgrToVec(m_pixels, BGRColor(palette[idx1]));
             } else {
               std::cerr << "Out of bounds color used...\n";
@@ -191,7 +192,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
 
             int idx2 = (byte) & ((1 << 4) - 1);
             if (x + 1 < width) {
-              if (idx2 < palette.size()) {
+              if (idx2 < palettleSz) {
                 pushBgrToVec(m_pixels, BGRColor(palette[idx2]));
               } else {
                 std::cerr << "Out of bounds color used...\n";
@@ -202,6 +203,36 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
         }
       }
 
+      break;
+    }
+
+    case 1: {
+      if (palettleSz > 2) {
+        std::cerr << "Palette too large...\n";
+        return false;
+      }
+      if (compression == 0) {
+        for (int y = 0; y < height; ++y) {
+          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
+          for (int x = 0; x < width; x += 8) {
+            int pixelIndex = fileIndex + (x / 8);
+            uint8_t byte = buff[pixelIndex];
+
+            for (int k = 7; k >= 0; k--) {
+              int currIdx = ((1 << k) & byte) >> k;
+              if (x + 7 - k >= width) {
+                break;
+              }
+              if (currIdx < palettleSz) {
+                pushBgrToVec(m_pixels, palette[currIdx]);
+              } else {
+                std::cerr << "Out of bounds color used...\n";
+                return false;
+              }
+            }
+          }
+        }
+      }
       break;
     }
 
@@ -247,7 +278,7 @@ bool Image::load(const std::string& file) {
 
 int main() {
   Image img;
-  if (!img.load("/home/aayushad/Wayland/bmpsuite-2.8/g/pal4.bmp")) {
+  if (!img.load("/home/aayushad/Wayland/bmpsuite-2.8/g/pal1.bmp")) {
     return 1;
   }
 
