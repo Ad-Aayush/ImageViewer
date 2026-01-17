@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 extern "C" {
@@ -21,6 +22,14 @@ void pushBgrToVec(std::vector<uint8_t>& pixels, const BGRColor color) {
   pixels.push_back(color.g);
   pixels.push_back(color.r);
   pixels.push_back(255);
+}
+
+void writeBgrToIdx(std::vector<uint8_t>& pixels, const BGRColor color,
+                   int32_t idx) {
+  pixels[idx] = color.b;
+  pixels[idx + 1] = color.g;
+  pixels[idx + 2] = color.r;
+  pixels[idx + 3] = 255;
 }
 
 BGRColor bgrFrom16bits(uint16_t curr) {
@@ -117,6 +126,11 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
   std::cout << "Found BMP\n";
   BmpHeader header = parseBmpHeader(buff);
 
+  if (header.infoHeaderSz != 40) {
+    std::cerr << "Not supported yet...\n";
+    return false;
+  }
+
   m_width = header.width;
   m_height = header.height;
   m_pixels.reserve(m_width * m_height * 4);
@@ -201,10 +215,108 @@ bool Image::decode16Bit(const std::vector<uint8_t>& buff,
   return true;
 }
 
+std::optional<uint32_t> readNextByte(const std::vector<uint8_t>& buff,
+                                     int& buffIdx) {
+  int32_t byte;
+  if ((size_t)buffIdx < buff.size()) {
+    byte = buff[buffIdx++];
+  } else {
+    std::cerr << "Unexpted end of buffer...\n";
+    return std::nullopt;
+  }
+
+  return byte;
+}
+
 bool Image::decodeRle8(const std::vector<uint8_t>& buff,
                        const BmpHeader& header,
                        const std::vector<BGRColor>& palette) {
-  return false;
+  std::cout << "Found RLE8\n";
+  int x = 0, y = 0;
+  int buffIdx = header.dataOffset;
+
+  for (int i = 0; i < m_width * m_height; ++i) {
+    pushBgrToVec(m_pixels, palette[0]);
+  }
+
+  while (true) {
+    int32_t byte1 = readNextByte(buff, buffIdx).value_or(-1);
+    int32_t byte2 = readNextByte(buff, buffIdx).value_or(-1);
+
+    if (byte1 == -1 || byte2 == -1) {
+      return false;
+    }
+
+    if (byte1 == 0 && byte2 == 1) {
+      break;
+    } else if (byte1 == 0 && byte2 == 0) {
+      x = 0;
+      y++;
+      if (x < 0 || x > header.width || y < 0 || y >= header.height) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+    } else if (byte1 == 0 && byte2 == 2) {
+      int32_t dx = readNextByte(buff, buffIdx).value_or(-1);
+      int32_t dy = readNextByte(buff, buffIdx).value_or(-1);
+
+      if (dx == -1 || dy == -1) {
+        return false;
+      }
+      x += dx;
+      y += dy;
+      if (x < 0 || x > header.width || y < 0 || y >= header.height) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+    } else if (byte1 == 0) {
+      // Absolute Mode
+      int32_t len = byte2;
+      if (x + len > header.width) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+      for (int i = 0; i < len; ++i) {
+        int32_t curByte = readNextByte(buff, buffIdx).value_or(-1);
+        if (curByte == -1) {
+          return false;
+        }
+        if ((size_t)curByte < palette.size()) {
+          int writeIdx = 4 * (x + (header.height - y - 1) * header.width);
+          writeBgrToIdx(m_pixels, palette[curByte], writeIdx);
+        } else {
+          std::cerr << "Out of bounds palette access...\n";
+          return false;
+        }
+        x++;
+      }
+      if (len % 2 != 0) {
+        auto padByte = readNextByte(buff, buffIdx);
+        if (!padByte.has_value()) {
+          std::cerr << "Unexpected EOF...\n";
+          return false;
+        }
+      }
+    } else {
+      int32_t cnt = byte1, idx = byte2;
+      if ((size_t)idx >= palette.size()) {
+        std::cerr << "Out of bounds...\n";
+        return false;
+      }
+      if (x + cnt > header.width) {
+        std::cerr << "Out of Bounds access...\n";
+        return false;
+      }
+
+      for (int i = 0; i < cnt; i++) {
+        int writeIdx = 4 * (x + (header.height - y - 1) * header.width);
+        writeBgrToIdx(m_pixels, palette[idx], writeIdx);
+        x++;
+      }
+    }
+  }
+  std::cout << "Parsed RLE8\n";
+  return true;
 }
 
 bool Image::decode8Bit(const std::vector<uint8_t>& buff,
@@ -340,7 +452,7 @@ bool Image::load(const std::string& file) {
 
 int main() {
   Image img;
-  if (!img.load("/home/aayushad/Wayland/bmpsuite-2.8/g/pal1.bmp")) {
+  if (!img.load("/home/aayushad/Wayland/bmpsuite-2.8/g/pal8rle.bmp")) {
     return 1;
   }
 
