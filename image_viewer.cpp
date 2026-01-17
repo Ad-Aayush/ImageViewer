@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -27,13 +28,26 @@ BGRColor bgrFrom16bits(uint16_t curr) {
   uint8_t g = (curr >> 5) & ((1 << 5) - 1);
   uint8_t r = (curr >> 10) & ((1 << 5) - 1);
 
-  // I now have 5 bit colors, I need 8 bits.
+  // Expand 5-bit to 8-bit
   b = (b << 3) | (b >> 2);
   g = (g << 3) | (g >> 2);
   r = (r << 3) | (r >> 2);
 
   return BGRColor(b, g, r);
 }
+
+struct BmpHeader {
+  uint32_t fileSize;
+  int32_t width;
+  int32_t height;
+  uint32_t dataOffset;
+  uint16_t bitsPerPixel;
+  uint32_t colorsUsed;
+  uint32_t compression;
+  uint32_t infoHeaderSz;
+  int tableStart;
+  int tableSz;
+};
 
 class Image {
  public:
@@ -53,195 +67,243 @@ class Image {
   std::vector<uint8_t> m_pixels;
 
   bool parseBmp(std::vector<uint8_t>& buff);
+  BmpHeader parseBmpHeader(std::vector<uint8_t>& buff);
+
+  bool decode24Bit(const std::vector<uint8_t>& buff, const BmpHeader& header);
+  bool decode16Bit(const std::vector<uint8_t>& buff, const BmpHeader& header);
+  bool decode8Bit(const std::vector<uint8_t>& buff, const BmpHeader& header,
+                  const std::vector<BGRColor>& palette);
+  bool decodeRle8(const std::vector<uint8_t>& buff, const BmpHeader& header,
+                  const std::vector<BGRColor>& palette);
+  bool decode4Bit(const std::vector<uint8_t>& buff, const BmpHeader& header,
+                  const std::vector<BGRColor>& palette);
+  bool decode1Bit(const std::vector<uint8_t>& buff, const BmpHeader& header,
+                  const std::vector<BGRColor>& palette);
 };
+
+BmpHeader Image::parseBmpHeader(std::vector<uint8_t>& buff) {
+  BmpHeader header{};
+  std::memcpy(&header.fileSize, &buff[2], 4);
+  std::cout << "FileSize: " << header.fileSize << "\n";
+
+  std::memcpy(&header.infoHeaderSz, &buff[14], 4);
+
+  std::memcpy(&header.width, &buff[18], 4);
+  std::cout << "Width: " << header.width << "\n";
+
+  std::memcpy(&header.height, &buff[22], 4);
+  std::cout << "Height: " << header.height << "\n";
+
+  std::memcpy(&header.dataOffset, &buff[10], 4);
+  std::cout << "DataOffset: " << header.dataOffset << "\n";
+
+  std::memcpy(&header.bitsPerPixel, &buff[28], 2);
+  std::cout << "BitsPerPixel: " << header.bitsPerPixel << "\n";
+
+  std::memcpy(&header.colorsUsed, &buff[46], 4);
+  std::cout << "ColorsUsed: " << header.colorsUsed << "\n";
+
+  std::memcpy(&header.compression, &buff[30], 4);
+  std::cout << "Compression: " << header.compression << "\n";
+
+  header.tableStart = 14 + header.infoHeaderSz;
+  header.tableSz = (header.dataOffset - header.tableStart);
+  std::cout << "TableSize: " << header.tableSz << "\n";
+
+  return header;
+}
 
 bool Image::parseBmp(std::vector<uint8_t>& buff) {
   std::cout << "Found BMP\n";
-  int fileSize = 0;
-  std::memcpy(&fileSize, &buff[2], 4);
-  std::cout << "FileSize: " << fileSize << "\n";
+  BmpHeader header = parseBmpHeader(buff);
 
-  int width = 0;
-  std::memcpy(&width, &buff[18], 4);
-  std::cout << "Width: " << width << "\n";
-
-  int height = 0;
-  std::memcpy(&height, &buff[22], 4);
-  std::cout << "Height: " << height << "\n";
-
-  int dataOffset = 0;
-  std::memcpy(&dataOffset, &buff[10], 4);
-  std::cout << "DataOffset: " << dataOffset << "\n";
-
-  int bitsPerPixel = 0;
-  std::memcpy(&bitsPerPixel, &buff[28], 2);
-  std::cout << "BitsPerPixel: " << bitsPerPixel << "\n";
-
-  size_t colorsUsed = 0;
-  std::memcpy(&colorsUsed, &buff[46], 4);
-  std::cout << "ColorsUsed: " << colorsUsed << "\n";
-
-  int compression = 0;
-  std::memcpy(&compression, &buff[30], 4);
-  std::cout << "Compression: " << compression << "\n";
-
-  int tableStart = 0x36;
-  int tableSz = (dataOffset - tableStart);
-  std::cout << "TableSize: " << tableSz << "\n";
-
-  m_width = width;
-  m_height = height;
-
+  m_width = header.width;
+  m_height = header.height;
   m_pixels.reserve(m_width * m_height * 4);
-  int paddedRowSz = ((width * bitsPerPixel + 31) / 32) * 4;
+
+  // Load Palette for indexed formats
   std::vector<BGRColor> palette;
+  if (header.bitsPerPixel <= 8) {
+    int maxColors = 1 << header.bitsPerPixel;
+    int givenColors = std::min(header.tableSz / 4, maxColors);
 
-  if (bitsPerPixel <= 8) {
-    for (int i = tableStart; i < tableStart + tableSz; i += 4) {
-      uint8_t b = buff[i];
-      uint8_t g = buff[i + 1];
-      uint8_t r = buff[i + 2];
-
+    for (int i = 0; i < givenColors; i++) {
+      int idx = header.tableStart + (i * 4);
+      uint8_t b = buff[idx];
+      uint8_t g = buff[idx + 1];
+      uint8_t r = buff[idx + 2];
       palette.emplace_back(b, g, r);
     }
   }
-  int palettleSz = palette.size();
 
-  switch (bitsPerPixel) {
+  switch (header.bitsPerPixel) {
     case 32:
-    case 24: {
-      if (compression == 0) {
-        for (int y = 0; y < height; ++y) {
-          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
-          for (int x = 0; x < width; ++x) {
-            int pixelIndex = fileIndex + (x * (bitsPerPixel) / 8);
-
-            uint8_t b = buff[pixelIndex++];
-            uint8_t g = buff[pixelIndex++];
-            uint8_t r = buff[pixelIndex++];
-
-            pushBgrToVec(m_pixels, BGRColor(b, g, r));
-          }
-        }
-      }
-
-      break;
-    }
-
-    case 16: {
-      if (compression == 0) {
-        for (int y = 0; y < height; ++y) {
-          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
-          for (int x = 0; x < width; ++x) {
-            int pixelIndex = fileIndex + (x * 2);
-
-            uint16_t curr = (uint16_t)buff[pixelIndex] |
-                            ((uint16_t)buff[pixelIndex + 1] << 8);
-            BGRColor bgr = bgrFrom16bits(curr);
-
-            pushBgrToVec(m_pixels, bgr);
-          }
-        }
-      }
-      break;
-    }
-
+    case 24:
+      return decode24Bit(buff, header);
+    case 16:
+      return decode16Bit(buff, header);
     case 8: {
-      if (palettleSz >= 256) {
-        std::cerr << "Palette too large...\n";
-        return false;
+      if (header.compression == 1) {
+        return decodeRle8(buff, header, palette);
       }
-      if (compression == 0) {
-        for (int y = 0; y < height; ++y) {
-          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
-          for (int x = 0; x < width; ++x) {
-            int pixelIndex = fileIndex + x;
-
-            if (buff[pixelIndex] >= palettleSz) {
-              std::cerr << "Out of bounds color used...\n";
-              return false;
-            }
-            BGRColor bgr = palette[buff[pixelIndex]];
-
-            pushBgrToVec(m_pixels, bgr);
-          }
-        }
-      }
-      break;
+      return decode8Bit(buff, header, palette);
     }
-
-    case 4: {
-      if (palettleSz > 16) {
-        std::cerr << "Palette too large...\n";
-        return false;
-      }
-      if (compression == 0) {
-        for (int y = 0; y < height; ++y) {
-          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
-          for (int x = 0; x < width; x += 2) {
-            int pixelIndex = fileIndex + (x / 2);
-            uint8_t byte = buff[pixelIndex];
-
-            int idx1 = (byte >> 4) & ((1 << 4) - 1);
-            if (idx1 < palettleSz) {
-              pushBgrToVec(m_pixels, BGRColor(palette[idx1]));
-            } else {
-              std::cerr << "Out of bounds color used...\n";
-              return false;
-            }
-
-            int idx2 = (byte) & ((1 << 4) - 1);
-            if (x + 1 < width) {
-              if (idx2 < palettleSz) {
-                pushBgrToVec(m_pixels, BGRColor(palette[idx2]));
-              } else {
-                std::cerr << "Out of bounds color used...\n";
-                return false;
-              }
-            }
-          }
-        }
-      }
-
-      break;
-    }
-
-    case 1: {
-      if (palettleSz > 2) {
-        std::cerr << "Palette too large...\n";
-        return false;
-      }
-      if (compression == 0) {
-        for (int y = 0; y < height; ++y) {
-          int fileIndex = dataOffset + ((height - 1 - y) * paddedRowSz);
-          for (int x = 0; x < width; x += 8) {
-            int pixelIndex = fileIndex + (x / 8);
-            uint8_t byte = buff[pixelIndex];
-
-            for (int k = 7; k >= 0; k--) {
-              int currIdx = ((1 << k) & byte) >> k;
-              if (x + 7 - k >= width) {
-                break;
-              }
-              if (currIdx < palettleSz) {
-                pushBgrToVec(m_pixels, palette[currIdx]);
-              } else {
-                std::cerr << "Out of bounds color used...\n";
-                return false;
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    default: {
+    case 4:
+      return decode4Bit(buff, header, palette);
+    case 1:
+      return decode1Bit(buff, header, palette);
+    default:
       std::cerr << "Not Supported yet...\n";
       return false;
+  }
+}
+
+bool Image::decode24Bit(const std::vector<uint8_t>& buff,
+                        const BmpHeader& header) {
+  if (header.compression != 0) return false;
+
+  int paddedRowSz = ((header.width * header.bitsPerPixel + 31) / 32) * 4;
+  int bytesPerPx = header.bitsPerPixel / 8;
+
+  for (int y = 0; y < header.height; ++y) {
+    int fileIndex = header.dataOffset + ((header.height - 1 - y) * paddedRowSz);
+    for (int x = 0; x < header.width; ++x) {
+      int pixelIndex = fileIndex + (x * bytesPerPx);
+
+      uint8_t b = buff[pixelIndex];
+      uint8_t g = buff[pixelIndex + 1];
+      uint8_t r = buff[pixelIndex + 2];
+
+      pushBgrToVec(m_pixels, BGRColor(b, g, r));
     }
   }
+  return true;
+}
 
+bool Image::decode16Bit(const std::vector<uint8_t>& buff,
+                        const BmpHeader& header) {
+  if (header.compression != 0) return false;
+
+  int paddedRowSz = ((header.width * header.bitsPerPixel + 31) / 32) * 4;
+
+  for (int y = 0; y < header.height; ++y) {
+    int fileIndex = header.dataOffset + ((header.height - 1 - y) * paddedRowSz);
+    for (int x = 0; x < header.width; ++x) {
+      int pixelIndex = fileIndex + (x * 2);
+
+      uint16_t curr =
+          (uint16_t)buff[pixelIndex] | ((uint16_t)buff[pixelIndex + 1] << 8);
+      BGRColor bgr = bgrFrom16bits(curr);
+
+      pushBgrToVec(m_pixels, bgr);
+    }
+  }
+  return true;
+}
+
+bool Image::decodeRle8(const std::vector<uint8_t>& buff,
+                       const BmpHeader& header,
+                       const std::vector<BGRColor>& palette) {
+  return false;
+}
+
+bool Image::decode8Bit(const std::vector<uint8_t>& buff,
+                       const BmpHeader& header,
+                       const std::vector<BGRColor>& palette) {
+  if (palette.size() > 256) {
+    std::cerr << "Palette too large...\n";
+    return false;
+  }
+  if (header.compression != 0) return false;
+
+  int paddedRowSz = ((header.width * header.bitsPerPixel + 31) / 32) * 4;
+
+  for (int y = 0; y < header.height; ++y) {
+    int fileIndex = header.dataOffset + ((header.height - 1 - y) * paddedRowSz);
+    for (int x = 0; x < header.width; ++x) {
+      int pixelIndex = fileIndex + x;
+
+      if (buff[pixelIndex] >= palette.size()) {
+        std::cerr << "Out of bounds color used...\n";
+        return false;
+      }
+      pushBgrToVec(m_pixels, palette[buff[pixelIndex]]);
+    }
+  }
+  return true;
+}
+
+bool Image::decode4Bit(const std::vector<uint8_t>& buff,
+                       const BmpHeader& header,
+                       const std::vector<BGRColor>& palette) {
+  if (palette.size() > 16) {
+    std::cerr << "Palette too large...\n";
+    return false;
+  }
+  if (header.compression != 0) return false;
+
+  int paddedRowSz = ((header.width * header.bitsPerPixel + 31) / 32) * 4;
+
+  for (int y = 0; y < header.height; ++y) {
+    int fileIndex = header.dataOffset + ((header.height - 1 - y) * paddedRowSz);
+    for (int x = 0; x < header.width; x += 2) {
+      int pixelIndex = fileIndex + (x / 2);
+      uint8_t byte = buff[pixelIndex];
+
+      // High Nibble
+      int idx1 = (byte >> 4) & 0x0F;
+      if ((size_t)idx1 < palette.size()) {
+        pushBgrToVec(m_pixels, palette[idx1]);
+      } else {
+        std::cerr << "Out of bounds color used...\n";
+        return false;
+      }
+
+      // Low Nibble
+      if (x + 1 < header.width) {
+        int idx2 = byte & 0x0F;
+        if ((size_t)idx2 < palette.size()) {
+          pushBgrToVec(m_pixels, palette[idx2]);
+        } else {
+          std::cerr << "Out of bounds color used...\n";
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool Image::decode1Bit(const std::vector<uint8_t>& buff,
+                       const BmpHeader& header,
+                       const std::vector<BGRColor>& palette) {
+  if (palette.size() > 2) {
+    std::cerr << "Palette too large...\n";
+    return false;
+  }
+  if (header.compression != 0) return false;
+
+  int paddedRowSz = ((header.width * header.bitsPerPixel + 31) / 32) * 4;
+
+  for (int y = 0; y < header.height; ++y) {
+    int fileIndex = header.dataOffset + ((header.height - 1 - y) * paddedRowSz);
+    for (int x = 0; x < header.width; x += 8) {
+      int pixelIndex = fileIndex + (x / 8);
+      uint8_t byte = buff[pixelIndex];
+
+      for (int k = 7; k >= 0; k--) {
+        if (x + 7 - k >= header.width) break;
+
+        int currIdx = (byte >> k) & 1;
+        if ((size_t)currIdx < palette.size()) {
+          pushBgrToVec(m_pixels, palette[currIdx]);
+        } else {
+          std::cerr << "Out of bounds color used...\n";
+          return false;
+        }
+      }
+    }
+  }
   return true;
 }
 
