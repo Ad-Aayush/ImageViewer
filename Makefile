@@ -7,6 +7,7 @@ CXXFLAGS = -g -Wall -Wextra -std=c++17
 LIBS = -lwayland-client -lrt
 
 TARGET = my_viewer
+ARGS ?= image.bmp
 
 OBJS = xdg-shell-protocol.o client.o image_viewer.o
 
@@ -28,6 +29,6 @@ clean:
 	rm -f $(TARGET) $(OBJS)
 
 run: $(TARGET)
-	./$(TARGET)
+	./$(TARGET) $(ARGS)
 
 .PHONY: all clean run

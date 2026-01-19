@@ -86,6 +86,8 @@ class Image {
                   const std::vector<BGRColor>& palette);
   bool decode4Bit(const std::vector<uint8_t>& buff, const BmpHeader& header,
                   const std::vector<BGRColor>& palette);
+  bool decodeRle4(const std::vector<uint8_t>& buff, const BmpHeader& header,
+                  const std::vector<BGRColor>& palette);
   bool decode1Bit(const std::vector<uint8_t>& buff, const BmpHeader& header,
                   const std::vector<BGRColor>& palette);
 };
@@ -96,6 +98,7 @@ BmpHeader Image::parseBmpHeader(std::vector<uint8_t>& buff) {
   std::cout << "FileSize: " << header.fileSize << "\n";
 
   std::memcpy(&header.infoHeaderSz, &buff[14], 4);
+  std::cout << "InfoHeaderSize: " << header.infoHeaderSz << "\n";
 
   std::memcpy(&header.width, &buff[18], 4);
   std::cout << "Width: " << header.width << "\n";
@@ -127,8 +130,7 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
   BmpHeader header = parseBmpHeader(buff);
 
   if (header.infoHeaderSz != 40) {
-    std::cerr << "Not supported yet...\n";
-    return false;
+    std::cerr << "May not work as info header is not 40 bytes...\n";
   }
 
   m_width = header.width;
@@ -162,8 +164,12 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
       }
       return decode8Bit(buff, header, palette);
     }
-    case 4:
+    case 4: {
+      if (header.compression == 2) {
+        return decodeRle4(buff, header, palette);
+      }
       return decode4Bit(buff, header, palette);
+    }
     case 1:
       return decode1Bit(buff, header, palette);
     default:
@@ -345,6 +351,123 @@ bool Image::decode8Bit(const std::vector<uint8_t>& buff,
   return true;
 }
 
+bool Image::decodeRle4(const std::vector<uint8_t>& buff,
+                       const BmpHeader& header,
+                       const std::vector<BGRColor>& palette) {
+  std::cout << "Found RLE4\n";
+  int x = 0, y = 0;
+  int buffIdx = header.dataOffset;
+
+  for (int i = 0; i < m_width * m_height; ++i) {
+    pushBgrToVec(m_pixels, palette[0]);
+  }
+
+  while (true) {
+    int32_t byte1 = readNextByte(buff, buffIdx).value_or(-1);
+    int32_t byte2 = readNextByte(buff, buffIdx).value_or(-1);
+
+    if (byte1 == -1 || byte2 == -1) {
+      return false;
+    }
+
+    if (byte1 == 0 && byte2 == 1) {
+      break;
+    } else if (byte1 == 0 && byte2 == 0) {
+      x = 0;
+      y++;
+      if (x < 0 || x > header.width || y < 0 || y >= header.height) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+    } else if (byte1 == 0 && byte2 == 2) {
+      int32_t dx = readNextByte(buff, buffIdx).value_or(-1);
+      int32_t dy = readNextByte(buff, buffIdx).value_or(-1);
+
+      if (dx == -1 || dy == -1) {
+        return false;
+      }
+      x += dx;
+      y += dy;
+      if (x < 0 || x > header.width || y < 0 || y >= header.height) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+    } else if (byte1 == 0) {
+      // Absolute Mode
+      int32_t len = byte2;
+      if (x + len > header.width) {
+        std::cerr << "Out of bounds access...\n";
+        return false;
+      }
+      int32_t end = x + len;
+      while (x < end) {
+        int32_t curByte = readNextByte(buff, buffIdx).value_or(-1);
+        if (curByte == -1) {
+          return false;
+        }
+
+        // High Nibble
+        int idx1 = (curByte >> 4) & 0x0F;
+        if ((size_t)idx1 < palette.size()) {
+          int writeIdx = 4 * (x + (header.height - y - 1) * header.width);
+          writeBgrToIdx(m_pixels, palette[idx1], writeIdx);
+        } else {
+          std::cerr << "Out of bounds palette access...\n";
+          return false;
+        }
+        x++;
+        if (x >= end) break;
+
+        // Low Nibble
+        int idx2 = curByte & 0x0F;
+        if ((size_t)idx2 < palette.size()) {
+          int writeIdx = 4 * (x + (header.height - y - 1) * header.width);
+          writeBgrToIdx(m_pixels, palette[idx2], writeIdx);
+        } else {
+          std::cerr << "Out of bounds palette access...\n";
+          return false;
+        }
+        x++;
+      }
+
+      if (((len + 1) / 2) % 2 == 1) {
+        auto padByte = readNextByte(buff, buffIdx);
+        if (!padByte.has_value()) {
+          std::cerr << "Unexpected EOF...\n";
+          return false;
+        }
+      }
+    } else {
+      int32_t cnt = byte1;
+      
+      if (x + cnt > header.width) {
+        std::cerr << "Out of Bounds access...\n";
+        return false;
+      }
+
+      for (int i = 0; i < cnt; i++) {
+        int idx;
+        if (i % 2 == 0) {
+          idx = (byte2 >> 4) & 0x0F;
+        } else {
+          idx = byte2 & 0x0F;
+        }
+
+        if ((size_t)idx >= palette.size()) {
+          std::cerr << "Out of bounds...\n";
+          return false;
+        }
+
+        int writeIdx = 4 * (x + (header.height - y - 1) * header.width);
+        writeBgrToIdx(m_pixels, palette[idx], writeIdx);
+        x++;
+      }
+    }
+  }
+  std::cout << "Parsed RLE4\n";
+  return true;
+}
+
 bool Image::decode4Bit(const std::vector<uint8_t>& buff,
                        const BmpHeader& header,
                        const std::vector<BGRColor>& palette) {
@@ -450,9 +573,15 @@ bool Image::load(const std::string& file) {
   return false;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+  if (argc != 2) {
+    std::cerr << "Usage: " << argv[0] << " <image-file>\n";
+    return 1;
+  }
+  std::string filePath = argv[1];
+
   Image img;
-  if (!img.load("/home/aayushad/Wayland/bmpsuite-2.8/g/pal8rle.bmp")) {
+  if (!img.load(filePath)) {
     return 1;
   }
 
