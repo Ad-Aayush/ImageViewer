@@ -238,6 +238,10 @@ bool Image::decodeRle8(const std::vector<uint8_t>& buff,
                        const BmpHeader& header,
                        const std::vector<BGRColor>& palette) {
   std::cout << "Found RLE8\n";
+  if (palette.size() == 0) {
+    std::cerr << "No palette found for RLE8...\n";
+    return false;
+  }
   int x = 0, y = 0;
   int buffIdx = header.dataOffset;
 
@@ -354,6 +358,10 @@ bool Image::decode8Bit(const std::vector<uint8_t>& buff,
 bool Image::decodeRle4(const std::vector<uint8_t>& buff,
                        const BmpHeader& header,
                        const std::vector<BGRColor>& palette) {
+  if (palette.size() == 0) {
+    std::cerr << "No palette found for RLE4...\n";
+    return false;
+  }
   std::cout << "Found RLE4\n";
   int x = 0, y = 0;
   int buffIdx = header.dataOffset;
