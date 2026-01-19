@@ -133,6 +133,11 @@ bool Image::parseBmp(std::vector<uint8_t>& buff) {
     std::cerr << "May not work as info header is not 40 bytes...\n";
   }
 
+  if (header.height < 0) {
+    std::cerr << "Top-down BMPs not supported...\n";
+    return false;
+  }
+
   m_width = header.width;
   m_height = header.height;
   m_pixels.reserve(m_width * m_height * 4);
