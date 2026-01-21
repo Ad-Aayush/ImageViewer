@@ -97,7 +97,7 @@ static struct wl_buffer *draw_frame(struct client_state *state) {
 
   struct wl_shm_pool *pool = wl_shm_create_pool(state->wl_shm, fd, size);
   struct wl_buffer *buffer = wl_shm_pool_create_buffer(
-      pool, 0, width, height, stride, WL_SHM_FORMAT_XRGB8888);
+      pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
   wl_shm_pool_destroy(pool);
   close(fd);
 
