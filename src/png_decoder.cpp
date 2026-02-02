@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <ios>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -19,6 +18,17 @@ struct Trie {
     left.push_back(-1);
     right.push_back(-1);
     sym.push_back(-1);
+  }
+
+  bool isSym(uint node) {
+    if (sym[node] != -1) {
+      return true;
+    }
+    return false;
+  }
+
+  int getSym(uint node) {
+    return sym[node];
   }
 
   uint goLeft(uint node) {
@@ -236,7 +246,30 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
   }
   std::cout << "Compression Level: " << (uint32_t)fLevel << "\n";
 
-  // Build Fixed Huffman Tables
+  std::vector<uint8_t> litlen_extra(29);
+  for (int i = 8; i < 28; i++) {
+    litlen_extra[i] = (i - 4) / 4;
+  }
+  std::vector<uint8_t> dist_extra(30);
+  for (int i = 4; i < 30; ++i) {
+    dist_extra[i] = (i - 2) / 2;
+  }
+  std::vector<uint8_t> litlen_bitlen(288);
+  for (int i = 0; i < 144; ++i) {
+    litlen_bitlen[i] = 8;
+  }
+  for (int i = 144; i < 256; ++i) {
+    litlen_bitlen[i] = 9;
+  }
+  for (int i = 256; i < 280; ++i) {
+    litlen_bitlen[i] = 7;
+  }
+  for (int i = 280; i < 288; ++i) {
+    litlen_bitlen[i] = 8;
+  }
+  std::vector<uint8_t> dist_bitlen(32, 5);
+  Trie fLitlenTrie = decoderFromBitLen(litlen_bitlen);
+  Trie fDistTrie = decoderFromBitLen(dist_bitlen);
 
   std::vector<uint8_t> data;
   int bitIdx = 0;
@@ -285,6 +318,34 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
       break;
     }
     case 0b01: {
+      while (true) {
+        int trieIdx = 0;
+        // Decode the huffman code.
+        while (!fLitlenTrie.isSym(trieIdx)) {
+          auto maybeNextBit = readNextNbits(enc, 1, idx, bitIdx);
+          if (!maybeNextBit.has_value()) {
+            return {};
+          }
+          uint8_t nextBit = maybeNextBit.value();
+          if (nextBit == 0) {
+            trieIdx = fLitlenTrie.left[trieIdx];
+          } else {
+            trieIdx = fLitlenTrie.right[trieIdx];
+          }
+          if (trieIdx == -1) {
+            std::cout << "Issue decoding huffman code...\n";
+            return {};
+          }
+        }
+        int sym = fLitlenTrie.getSym(trieIdx);
+        if (sym == 256) {
+          break;
+        } else if (sym < 256) {
+          data.push_back((uint8_t)sym);
+        } else {
+          // TODO: Use the base and extra bits table from the spec.
+        }
+      }
 
       break;
     }
@@ -372,7 +433,7 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
 
     } else if (chunkType == "IDAT") {
       encData.reserve(encData.size() + len);
-      for (int i = 0; i < len; ++i) {
+      for (uint32_t i = 0; i < len; ++i) {
         encData.push_back(buff[idx++]);
       }
     } else {
