@@ -1,7 +1,71 @@
 #include "png_decoder.h"
+#include "image.h"
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <ios>
 #include <iostream>
+#include <optional>
+#include <string>
 #include <vector>
+
+struct Trie {
+  std::vector<int> left, right, sym;
+  uint sz;
+
+  Trie() {
+    sz = 1;
+    left.push_back(-1);
+    right.push_back(-1);
+    sym.push_back(-1);
+  }
+
+  uint goLeft(uint node) {
+    if (left[node] != -1) {
+      return left[node];
+    }
+    return insertLeft(node);
+  }
+  uint goRight(uint node) {
+    if (right[node] != -1) {
+      return right[node];
+    }
+    return insertRight(node);
+  }
+
+  uint insertLeft(uint node) {
+    if (node >= sz) {
+      return 0;
+    }
+    left[node] = sz;
+    left.push_back(-1);
+    right.push_back(-1);
+    sym.push_back(-1);
+    return sz++;
+  }
+  uint insertRight(uint node) {
+    if (node >= sz) {
+      return 0;
+    }
+    right[node] = sz;
+    left.push_back(-1);
+    right.push_back(-1);
+    sym.push_back(-1);
+    return sz++;
+  }
+  bool setSym(uint node, uint s) {
+    if (node >= sz) {
+      return false;
+    }
+    if (left[node] != -1 or right[node] != -1) {
+      std::cout << "Not Prefix Free\n";
+      return false;
+    }
+    sym[node] = s;
+    return true;
+  }
+};
 
 bool PngDecoder::canDecode(const std::vector<uint8_t> &buff) const {
   if (buff.size() < 8) {
@@ -39,7 +103,7 @@ PngDecoder::read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx) const {
   uint32_t ans = 0;
   if (idx + 4 > (int)buff.size()) {
     std::cerr << "Unexpected End of file...\n";
-    return std::nullopt;
+    return {};
   }
 
   int cnt = 0;
@@ -57,7 +121,7 @@ PngDecoder::read4BytesAsStr(const std::vector<uint8_t> &buff, int &idx) const {
   std::string ans;
   if (idx + 4 > (int)buff.size()) {
     std::cerr << "Unexpected End of file...\n";
-    return std::nullopt;
+    return {};
   }
 
   int cnt = 0;
@@ -68,6 +132,173 @@ PngDecoder::read4BytesAsStr(const std::vector<uint8_t> &buff, int &idx) const {
   }
 
   return ans;
+}
+
+std::optional<uint32_t> readNextNbits(const std::vector<uint8_t> &buff, int N,
+                                      int &byteIdx, int &bitIdx) {
+  if (N > 32) {
+    return {};
+  }
+  uint32_t out = 0;
+  int curr = 0;
+  while (curr < N) {
+    if (bitIdx == 8) {
+      bitIdx = 0;
+      byteIdx++;
+    }
+    if ((size_t)byteIdx >= buff.size()) {
+      return {};
+    }
+    uint8_t currByte = buff[byteIdx];
+    out ^= ((currByte >> bitIdx) & 1) << curr;
+    curr++;
+    bitIdx++;
+  }
+  if (bitIdx == 8) {
+    bitIdx = 0;
+    byteIdx++;
+  }
+  return out;
+}
+
+std::vector<uint16_t>
+buildHuffmanFromBitLen(const std::vector<uint8_t> &bitLen) {
+  std::array<uint16_t, 16> bl_count{}, next_code{};
+  for (auto &x : bitLen) {
+    if (x < 16) {
+      bl_count[x]++;
+    }
+  }
+  std::vector<uint16_t> huffCode(bitLen.size());
+  uint16_t code = 0;
+  bl_count[0] = 0;
+  for (int bits = 1; bits <= 15; bits++) {
+    code = (code + bl_count[bits - 1]) << 1;
+    next_code[bits] = code;
+  }
+  for (size_t i = 0; i < bitLen.size(); ++i) {
+    if (bitLen[i] != 0) {
+      huffCode[i] = next_code[bitLen[i]];
+      next_code[bitLen[i]]++;
+    }
+  }
+  return huffCode;
+}
+
+Trie decoderFromBitLen(const std::vector<uint8_t> &bitLen) {
+  std::vector<uint16_t> huffCodes = buildHuffmanFromBitLen(bitLen);
+  Trie decoder;
+  int sz = bitLen.size();
+  for (int i = 0; i < sz; ++i) {
+    int len = bitLen[i];
+    if (len == 0) {
+      continue;
+    }
+    uint16_t code = huffCodes[i];
+    uint currNode = 0;
+    for (int j = len - 1; j >= 0; --j) {
+      uint8_t bit = (code >> j) & 1;
+      if (bit == 0) {
+        currNode = decoder.goLeft(currNode);
+      } else {
+        currNode = decoder.goRight(currNode);
+      }
+    }
+    decoder.setSym(currNode, i);
+  }
+  return decoder;
+}
+
+std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
+  int idx = 0;
+  auto maybeCmf = readNextByte(enc, idx);
+  auto maybeFlg = readNextByte(enc, idx);
+
+  if (!maybeCmf.has_value() or !maybeFlg.has_value()) {
+    return {};
+  }
+  uint8_t cmf = maybeCmf.value(), flg = maybeFlg.value();
+  uint8_t compMethod = cmf & ((1 << 4) - 1);
+  uint8_t cInfo = cmf >> 4;
+  if (compMethod != 8) {
+    return {};
+  }
+  if (cInfo > 7) {
+    return {};
+  }
+  uint8_t fDict = flg & (1 << 5);
+  uint8_t fLevel = flg >> 6;
+  if ((256 * cmf + flg) % 31 != 0) {
+    return {};
+  }
+  if (fDict != 0) {
+    return {};
+  }
+  std::cout << "Compression Level: " << (uint32_t)fLevel << "\n";
+
+  // Build Fixed Huffman Tables
+
+  std::vector<uint8_t> data;
+  int bitIdx = 0;
+  bool final = false;
+  while (!final) {
+    auto maybeFinal = readNextNbits(enc, 1, idx, bitIdx);
+    if (!maybeFinal.has_value()) {
+      return {};
+    }
+    final = maybeFinal.value();
+    auto maybeType = readNextNbits(enc, 2, idx, bitIdx);
+    if (!maybeType.has_value()) {
+      return {};
+    }
+    uint8_t type = maybeType.value();
+    switch (type) {
+    case 0b00: {
+      if (bitIdx != 0) {
+        bitIdx = 0;
+        idx++;
+      }
+      auto maybeLow = readNextByte(enc, idx),
+           maybeHigh = readNextByte(enc, idx);
+      if (!maybeLow.has_value() or !maybeHigh.has_value()) {
+        return {};
+      }
+      uint16_t low = maybeLow.value(), high = maybeHigh.value();
+      uint16_t len = low + (high << 8);
+      auto maybeLowN = readNextByte(enc, idx),
+           maybeHighN = readNextByte(enc, idx);
+      if (!maybeLowN.has_value() or !maybeHighN.has_value()) {
+        return {};
+      }
+      uint16_t lowN = maybeLowN.value(), highN = maybeHighN.value();
+      uint16_t lenN = lowN + (highN << 8);
+      if ((len ^ lenN) != 0xFFFF) {
+        return {};
+      }
+      for (int i = 0; i < len; ++i) {
+        auto maybeNextByte = readNextByte(enc, idx);
+        if (!maybeNextByte.has_value()) {
+          return {};
+        }
+        data.push_back(maybeNextByte.value());
+      }
+      break;
+    }
+    case 0b01: {
+
+      break;
+    }
+    case 0b10: {
+      break;
+    }
+    default: {
+      break;
+    }
+    }
+  }
+
+  std::cout << "Successfully Inflated\n";
+  return data;
 }
 
 PngDecoder::Ihdr PngDecoder::parseIhdr(const std::vector<uint8_t> &buff,
@@ -112,6 +343,7 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
   std::cout << "Found Png...\n";
   int idx = 8;
   Ihdr header;
+  std::vector<uint8_t> encData;
 
   while (true) {
     std::cout << "\n";
@@ -138,6 +370,11 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
       out.setDimensions(header.width, header.height);
       out.reservePixels(static_cast<size_t>(header.width) * header.height * 4);
 
+    } else if (chunkType == "IDAT") {
+      encData.reserve(encData.size() + len);
+      for (int i = 0; i < len; ++i) {
+        encData.push_back(buff[idx++]);
+      }
     } else {
       idx += len;
     }
@@ -155,6 +392,11 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
       break;
     }
   }
+  auto maybeData = inflate(encData);
+  if (!maybeData.has_value()) {
+    return false;
+  }
+  std::vector<uint8_t> data = maybeData.value();
 
   return true;
 }
