@@ -356,6 +356,8 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
           break;
         } else if (sym < 256) {
           data.push_back((uint8_t)sym);
+        } else if (sym > 285) {
+          return {};
         } else {
           uint32_t baseLen = litlen_base[sym - 257];
           uint8_t extraBits = litlen_extra[sym - 257];
@@ -388,6 +390,9 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
             }
           }
           sym = fDistTrie.getSym(trieIdx);
+          if (sym > 29) {
+            return {};
+          }
 
           uint32_t baseDist = dist_base[sym];
           extraBits = dist_extra[sym];
@@ -415,7 +420,203 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
     }
 
     case 0b10: {
-      std::cout << "Not Handled\n";
+      auto maybeHlit = readNextNbits(enc, 5, idx, bitIdx),
+           maybeHdist = readNextNbits(enc, 5, idx, bitIdx),
+           maybeHclen = readNextNbits(enc, 4, idx, bitIdx);
+      if (!maybeHlit.has_value() or !maybeHdist.has_value() or
+          !maybeHclen.has_value()) {
+        return {};
+      }
+      uint32_t hlit = maybeHlit.value() + 257, hdist = maybeHdist.value() + 1,
+               hclen = maybeHclen.value() + 4;
+      std::cout << "HLIT: " << hlit << ", HDIST: " << hdist
+                << ", HCLEN: " << hclen << "\n";
+      std::vector<uint32_t> weirdOrder = {16, 17, 18, 0, 8,  7, 9,  6, 10, 5,
+                                          11, 4,  12, 3, 13, 2, 14, 1, 15};
+      std::vector<uint8_t> clen_len(19);
+      for (int i = 0; i < hclen; ++i) {
+        auto maybeEntry = readNextNbits(enc, 3, idx, bitIdx);
+        if (!maybeEntry.has_value()) {
+          return {};
+        }
+        uint8_t entry = maybeEntry.value();
+        clen_len[weirdOrder[i]] = entry;
+      }
+      Trie metaTrie = decoderFromBitLen(clen_len);
+      uint16_t totalCodes = hlit + hdist;
+      uint16_t currCode = 0;
+      std::vector<uint8_t> code_lens;
+
+      while (currCode < totalCodes) {
+        int trieIdx = 0;
+        while (!metaTrie.isSym(trieIdx)) {
+          auto maybeNextBit = readNextNbits(enc, 1, idx, bitIdx);
+          if (!maybeNextBit.has_value()) {
+            return {};
+          }
+          uint8_t nextBit = maybeNextBit.value();
+          if (nextBit == 0) {
+            trieIdx = metaTrie.left[trieIdx];
+          } else {
+            trieIdx = metaTrie.right[trieIdx];
+          }
+          if (trieIdx == -1) {
+            std::cout << "Issue decoding huffman code...\n";
+            return {};
+          }
+        }
+        int code = metaTrie.getSym(trieIdx);
+
+        if (code <= 15) {
+          code_lens.push_back(code);
+          currCode++;
+        } else if (code == 16) {
+          auto maybeFreq = readNextNbits(enc, 2, idx, bitIdx);
+          if (!maybeFreq.has_value()) {
+            return {};
+          }
+          uint8_t freq = maybeFreq.value() + 3;
+          if (code_lens.size() != 0 and currCode + freq <= totalCodes) {
+            for (uint8_t i = 0; i < freq; ++i) {
+              code_lens.push_back(code_lens.back());
+              currCode++;
+            }
+          } else {
+            return {};
+          }
+        } else if (code == 17) {
+          auto maybeFreq = readNextNbits(enc, 3, idx, bitIdx);
+          if (!maybeFreq.has_value()) {
+            return {};
+          }
+          uint8_t freq = maybeFreq.value() + 3;
+          if (currCode + freq <= totalCodes) {
+            for (uint8_t i = 0; i < freq; ++i) {
+              code_lens.push_back(0);
+              currCode++;
+            }
+          } else {
+            return {};
+          }
+        } else if (code == 18) {
+          auto maybeFreq = readNextNbits(enc, 7, idx, bitIdx);
+          if (!maybeFreq.has_value()) {
+            return {};
+          }
+          uint8_t freq = maybeFreq.value() + 11;
+          if (currCode + freq <= totalCodes) {
+            for (uint8_t i = 0; i < freq; ++i) {
+              code_lens.push_back(0);
+              currCode++;
+            }
+          } else {
+            return {};
+          }
+        }
+      }
+      std::vector<uint8_t> lit_lens(hlit), dist_lens(hdist);
+      bool allDistZero = true;
+
+      for (int i = 0; i < hlit; i++) {
+        lit_lens[i] = code_lens[i];
+      }
+      for (int i = hlit; i < totalCodes; ++i) {
+        dist_lens[i - hlit] = code_lens[i];
+        if (code_lens[i] != 0) {
+          allDistZero = false;
+        }
+      }
+
+      if (lit_lens[256] == 0) {
+        return {};
+      }
+
+      Trie litTrie = decoderFromBitLen(lit_lens),
+           distTrie = decoderFromBitLen(dist_lens);
+
+      while (true) {
+        int trieIdx = 0;
+        while (!litTrie.isSym(trieIdx)) {
+          auto maybeNextBit = readNextNbits(enc, 1, idx, bitIdx);
+          if (!maybeNextBit.has_value()) {
+            return {};
+          }
+          uint8_t nextBit = maybeNextBit.value();
+          if (nextBit == 0) {
+            trieIdx = litTrie.left[trieIdx];
+          } else {
+            trieIdx = litTrie.right[trieIdx];
+          }
+          if (trieIdx == -1) {
+            std::cout << "Issue decoding huffman code...\n";
+            return {};
+          }
+        }
+        int sym = litTrie.getSym(trieIdx);
+
+        if (sym == 256) {
+          break;
+        } else if (sym < 256) {
+          data.push_back((uint8_t)sym);
+        } else if (sym > 285) {
+          return {};
+        } else if (!allDistZero) {
+          uint32_t baseLen = litlen_base[sym - 257];
+          uint8_t extraBits = litlen_extra[sym - 257];
+          uint32_t extraLen = 0;
+          for (int i = 0; i < extraBits; ++i) {
+            auto maybeBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeBit.has_value()) {
+              return {};
+            }
+            uint8_t bit = maybeBit.value();
+            extraLen = (bit << i) | extraLen;
+          }
+          uint32_t len = baseLen + extraLen;
+
+          trieIdx = 0;
+          while (!distTrie.isSym(trieIdx)) {
+            auto maybeNextBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeNextBit.has_value()) {
+              return {};
+            }
+            uint8_t nextBit = maybeNextBit.value();
+            if (nextBit == 0) {
+              trieIdx = distTrie.left[trieIdx];
+            } else {
+              trieIdx = distTrie.right[trieIdx];
+            }
+            if (trieIdx == -1) {
+              std::cout << "Issue decoding huffman code...\n";
+              return {};
+            }
+          }
+          sym = distTrie.getSym(trieIdx);
+
+          uint32_t baseDist = dist_base[sym];
+          extraBits = dist_extra[sym];
+          uint32_t extraDist = 0;
+          for (int i = 0; i < extraBits; ++i) {
+            auto maybeBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeBit.has_value()) {
+              return {};
+            }
+            uint8_t bit = maybeBit.value();
+            extraDist = (bit << i) | extraDist;
+          }
+          uint32_t dist = baseDist + extraDist;
+          uint32_t size = data.size();
+          if (size < dist) {
+            return {};
+          }
+          for (uint32_t i = 0; i < len; i++) {
+            size = data.size();
+            data.push_back(data[size - dist]);
+          }
+        } else {
+          return {};
+        }
+      }
       break;
     }
     default: {
