@@ -10,6 +10,8 @@ class PngDecoder final : public ImageDecoder {
 public:
   bool canDecode(const std::vector<uint8_t> &buff) const override;
   bool decode(const std::vector<uint8_t> &buff, Image &out) const override;
+  static std::optional<uint32_t> read4BytesAsU32(const std::vector<uint8_t> &buff,
+      int &idx);
 
 private:
   struct Ihdr {
@@ -23,8 +25,6 @@ private:
   };
   bool parsePng(const std::vector<uint8_t> &buff, Image &out) const;
   Ihdr parseIhdr(const std::vector<uint8_t> &buff, int &idx) const;
-  std::optional<uint32_t> read4BytesAsU32(const std::vector<uint8_t> &buff,
-                                          int &idx) const;
   std::optional<std::string> read4BytesAsStr(const std::vector<uint8_t> &buff,
                                              int &idx) const;
 };

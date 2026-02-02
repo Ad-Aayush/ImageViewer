@@ -27,9 +27,7 @@ struct Trie {
     return false;
   }
 
-  int getSym(uint node) {
-    return sym[node];
-  }
+  int getSym(uint node) { return sym[node]; }
 
   uint goLeft(uint node) {
     if (left[node] != -1) {
@@ -109,7 +107,7 @@ bool PngDecoder::canDecode(const std::vector<uint8_t> &buff) const {
 }
 
 std::optional<uint32_t>
-PngDecoder::read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx) const {
+PngDecoder::read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx) {
   uint32_t ans = 0;
   if (idx + 4 > (int)buff.size()) {
     std::cerr << "Unexpected End of file...\n";
@@ -250,9 +248,22 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
   for (int i = 8; i < 28; i++) {
     litlen_extra[i] = (i - 4) / 4;
   }
-  std::vector<uint8_t> dist_extra(30);
+  std::vector<uint32_t> litlen_base(29);
+  uint32_t val = 3;
+  for (int i = 0; i < 29; i++) {
+    litlen_base[i] = val;
+    val += 1 << litlen_extra[i];
+  }
+  litlen_base[28] = 258;
+  std::vector<uint32_t> dist_extra(30);
   for (int i = 4; i < 30; ++i) {
     dist_extra[i] = (i - 2) / 2;
+  }
+  std::vector<uint32_t> dist_base(30);
+  val = 1;
+  for (int i = 0; i < 30; i++) {
+    dist_base[i] = val;
+    val += 1 << dist_extra[i];
   }
   std::vector<uint8_t> litlen_bitlen(288);
   for (int i = 0; i < 144; ++i) {
@@ -285,6 +296,7 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
       return {};
     }
     uint8_t type = maybeType.value();
+
     switch (type) {
     case 0b00: {
       if (bitIdx != 0) {
@@ -317,6 +329,7 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
       }
       break;
     }
+
     case 0b01: {
       while (true) {
         int trieIdx = 0;
@@ -338,24 +351,99 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
           }
         }
         int sym = fLitlenTrie.getSym(trieIdx);
+
         if (sym == 256) {
           break;
         } else if (sym < 256) {
           data.push_back((uint8_t)sym);
         } else {
-          // TODO: Use the base and extra bits table from the spec.
+          uint32_t baseLen = litlen_base[sym - 257];
+          uint8_t extraBits = litlen_extra[sym - 257];
+          uint32_t extraLen = 0;
+          for (int i = 0; i < extraBits; ++i) {
+            auto maybeBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeBit.has_value()) {
+              return {};
+            }
+            uint8_t bit = maybeBit.value();
+            extraLen = (bit << i) | extraLen;
+          }
+          uint32_t len = baseLen + extraLen;
+
+          trieIdx = 0;
+          while (!fDistTrie.isSym(trieIdx)) {
+            auto maybeNextBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeNextBit.has_value()) {
+              return {};
+            }
+            uint8_t nextBit = maybeNextBit.value();
+            if (nextBit == 0) {
+              trieIdx = fDistTrie.left[trieIdx];
+            } else {
+              trieIdx = fDistTrie.right[trieIdx];
+            }
+            if (trieIdx == -1) {
+              std::cout << "Issue decoding huffman code...\n";
+              return {};
+            }
+          }
+          sym = fDistTrie.getSym(trieIdx);
+
+          uint32_t baseDist = dist_base[sym];
+          extraBits = dist_extra[sym];
+          uint32_t extraDist = 0;
+          for (int i = 0; i < extraBits; ++i) {
+            auto maybeBit = readNextNbits(enc, 1, idx, bitIdx);
+            if (!maybeBit.has_value()) {
+              return {};
+            }
+            uint8_t bit = maybeBit.value();
+            extraDist = (bit << i) | extraDist;
+          }
+          uint32_t dist = baseDist + extraDist;
+          uint32_t size = data.size();
+          if (size < dist) {
+            return {};
+          }
+          for (uint32_t i = 0; i < len; i++) {
+            size = data.size();
+            data.push_back(data[size - dist]);
+          }
         }
       }
-
       break;
     }
+
     case 0b10: {
+      std::cout << "Not Handled\n";
       break;
     }
     default: {
       break;
     }
     }
+  }
+  if (bitIdx != 0) {
+    bitIdx = 0;
+    idx++;
+  }
+  // Adler-32 match
+  uint32_t s1 = 1, s2 = 0;
+  for (int i = 0; i < (int)data.size(); i++) {
+    s1 = (s1 + (uint32_t)data[i]) % 65521;
+    s2 = (s2 + s1) % 65521;
+  }
+  uint32_t exp = (s2 << 16) | s1;
+  auto maybeAdl = PngDecoder::read4BytesAsU32(enc, idx);
+  if (!maybeAdl.has_value()) {
+    return {};
+  }
+  uint32_t adl = maybeAdl.value();
+  if (adl != exp) {
+    std::cout << "Checksum failed\n";
+    std::cout << "Expected: " << exp << "\n";
+    std::cout << "Found: " << adl << "\n";
+    return {};
   }
 
   std::cout << "Successfully Inflated\n";
