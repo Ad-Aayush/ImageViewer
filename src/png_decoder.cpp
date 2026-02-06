@@ -1,12 +1,14 @@
 #include "png_decoder.h"
 #include "image.h"
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 struct Trie {
@@ -429,12 +431,12 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
       }
       uint32_t hlit = maybeHlit.value() + 257, hdist = maybeHdist.value() + 1,
                hclen = maybeHclen.value() + 4;
-      std::cout << "HLIT: " << hlit << ", HDIST: " << hdist
-                << ", HCLEN: " << hclen << "\n";
+      // std::cout << "HLIT: " << hlit << ", HDIST: " << hdist
+                // << ", HCLEN: " << hclen << "\n";
       std::vector<uint32_t> weirdOrder = {16, 17, 18, 0, 8,  7, 9,  6, 10, 5,
                                           11, 4,  12, 3, 13, 2, 14, 1, 15};
       std::vector<uint8_t> clen_len(19);
-      for (int i = 0; i < hclen; ++i) {
+      for (uint8_t i = 0; i < hclen; ++i) {
         auto maybeEntry = readNextNbits(enc, 3, idx, bitIdx);
         if (!maybeEntry.has_value()) {
           return {};
@@ -517,7 +519,7 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
       std::vector<uint8_t> lit_lens(hlit), dist_lens(hdist);
       bool allDistZero = true;
 
-      for (int i = 0; i < hlit; i++) {
+      for (uint32_t i = 0; i < hlit; i++) {
         lit_lens[i] = code_lens[i];
       }
       for (int i = hlit; i < totalCodes; ++i) {
@@ -689,6 +691,91 @@ PngDecoder::Ihdr PngDecoder::parseIhdr(const std::vector<uint8_t> &buff,
   return header;
 }
 
+int paethPredictor(int a, int b, int c) {
+  int p = a + b - c;
+  int da = std::abs(p - a);
+  int db = std::abs(p - b);
+  int dc = std::abs(p - c);
+
+  if (da <= db and da <= dc) {
+    return a;
+  } else if (db <= da and db <= dc) {
+    return b;
+  } else {
+    return c;
+  }
+}
+
+std::optional<std::vector<uint8_t>> unfilter(const std::vector<uint8_t> &buff,
+                                             const PngDecoder::Ihdr &header) {
+  int rowBytes = ((header.width * header.bitsPerPixel + 7) / 8);
+  int bpp = (header.bitsPerPixel + 7) / 8;
+  std::vector<uint8_t> unfiltered;
+  std::vector<uint8_t> prevRowRecon(rowBytes, 0);
+  int idx = 0;
+  for (uint32_t i = 0; i < header.height; ++i) {
+    auto maybeFilterType = readNextByte(buff, idx);
+    if (!maybeFilterType.has_value()) {
+      return {};
+    }
+    int filterType = maybeFilterType.value();
+    std::vector<uint8_t> currRow;
+    currRow.reserve(rowBytes);
+    std::vector<uint8_t> recon(rowBytes, 0);
+    for (int j = 0; j < rowBytes; ++j) {
+      auto maybeNextByte = readNextByte(buff, idx);
+      if (!maybeNextByte.has_value()) {
+        return {};
+      }
+      currRow.push_back(maybeNextByte.value());
+    }
+
+    for (int j = 0; j < rowBytes; ++j) {
+      uint8_t a, b, c, x;
+      x = currRow[j];
+      if (j >= bpp) {
+        a = recon[j - bpp];
+        c = prevRowRecon[j - bpp];
+      } else {
+        a = 0;
+        c = 0;
+      }
+      b = prevRowRecon[j];
+
+      switch (filterType) {
+      case 0:
+        recon[j] = x;
+        break;
+
+      case 1:
+        recon[j] = x + a;
+        break;
+      case 2:
+        recon[j] = x + b;
+        break;
+      case 3:
+        recon[j] = x + (a + b) / 2;
+        break;
+
+      case 4:
+        recon[j] = x + paethPredictor(a, b, c);
+        break;
+
+      default:
+        std::cerr << "Unknown Filter Type...\n";
+        return {};
+      }
+    }
+
+    for (int j = 0; j < rowBytes; ++j) {
+      prevRowRecon[j] = recon[j];
+      unfiltered.push_back(recon[j]);
+    }
+  }
+
+  return unfiltered;
+}
+
 bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
   std::cout << "Found Png...\n";
   int idx = 8;
@@ -742,11 +829,73 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
       break;
     }
   }
-  auto maybeData = inflate(encData);
-  if (!maybeData.has_value()) {
+  auto maybeInflated = inflate(encData);
+  if (!maybeInflated.has_value()) {
     return false;
   }
-  std::vector<uint8_t> data = maybeData.value();
+  std::vector<uint8_t> inflated = maybeInflated.value();
+  // Unfilter
+  switch (header.colorType) {
+  case 0:
+    header.channels = 1;
+    break;
+
+  case 2:
+    header.channels = 3;
+    break;
+
+  case 3:
+    header.channels = 1;
+    break;
+
+  case 4:
+    header.channels = 2;
+    break;
+
+  case 6:
+    header.channels = 4;
+    break;
+
+  default:
+    std::cerr << "Unknown color type...\n";
+    return {};
+  }
+  header.bitsPerPixel = header.channels * header.bitDepth;
+  uint16_t filterBpp = std::ceil(header.bitsPerPixel / 8.0);
+  std::cout << "Filter BPP: " << filterBpp << "\n";
+  auto maybeUnfiltered = unfilter(inflated, header);
+  if (!maybeUnfiltered.has_value()) {
+    return false;
+  }
+  std::vector<uint8_t> unfiltered = maybeUnfiltered.value();
+  int p = 0;
+  for (uint32_t x = 0; x < header.height; ++x) {
+    for (uint32_t y = 0; y < header.width; ++y) {
+      if (header.channels == 3) {
+        auto maybeR = readNextByte(unfiltered, p),
+             maybeG = readNextByte(unfiltered, p),
+             maybeB = readNextByte(unfiltered, p);
+        if (!maybeR.has_value() or !maybeG.has_value() or !maybeB.has_value()) {
+          return false;
+        }
+        uint8_t r = maybeR.value(), g = maybeG.value(), b = maybeB.value();
+        int writeIdx = 4 * (x * header.width + y);
+        out.writePixelAtByteIndex(writeIdx, RGBA(b, g, r));
+      } else if (header.channels == 4) {
+        auto maybeR = readNextByte(unfiltered, p),
+             maybeG = readNextByte(unfiltered, p),
+             maybeB = readNextByte(unfiltered, p),
+             maybeA = readNextByte(unfiltered, p);
+        if (!maybeR.has_value() or !maybeG.has_value() or !maybeB.has_value() or
+            !maybeA.has_value()) {
+          return false;
+        }
+        uint8_t r = maybeR.value(), g = maybeG.value(), b = maybeB.value(), a = maybeA.value();
+        int writeIdx = 4 * (x * header.width + y);
+        out.writePixelAtByteIndex(writeIdx, RGBA(b, g, r, a));
+      }
+    }
+  }
 
   return true;
 }

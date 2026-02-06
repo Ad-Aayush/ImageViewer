@@ -13,7 +13,6 @@ public:
   static std::optional<uint32_t> read4BytesAsU32(const std::vector<uint8_t> &buff,
       int &idx);
 
-private:
   struct Ihdr {
     uint32_t width;
     uint32_t height;
@@ -22,7 +21,11 @@ private:
     uint8_t compMethod;
     uint8_t filterMethod;
     uint8_t interlceMethod;
+    // Derieved data
+    uint8_t channels;
+    uint8_t bitsPerPixel;
   };
+private:
   bool parsePng(const std::vector<uint8_t> &buff, Image &out) const;
   Ihdr parseIhdr(const std::vector<uint8_t> &buff, int &idx) const;
   std::optional<std::string> read4BytesAsStr(const std::vector<uint8_t> &buff,
