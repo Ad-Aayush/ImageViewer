@@ -706,6 +706,69 @@ int paethPredictor(int a, int b, int c) {
   }
 }
 
+uint8_t normalizeSampleTo8(uint16_t sample, uint8_t bitDepth) {
+  switch (bitDepth) {
+  case 1:
+  case 2:
+  case 4: {
+    uint32_t maxValue = (1u << bitDepth) - 1u;
+    return static_cast<uint8_t>((sample * 255u + (maxValue / 2u)) / maxValue);
+  }
+  case 8:
+    return static_cast<uint8_t>(sample);
+  case 16:
+    return static_cast<uint8_t>((sample * 255u + 32767u) / 65535u);
+  default:
+    return 0;
+  }
+}
+
+std::optional<uint16_t> readNextSampleMsb(const std::vector<uint8_t> &row,
+                                          uint8_t bitDepth, int &byteIdx,
+                                          int &bitIdx) {
+  if (bitDepth == 1 || bitDepth == 2 || bitDepth == 4) {
+    if ((size_t)byteIdx >= row.size()) {
+      return {};
+    }
+    if (bitIdx + bitDepth > 8) {
+      bitIdx = 0;
+      byteIdx++;
+      if ((size_t)byteIdx >= row.size()) {
+        return {};
+      }
+    }
+    uint8_t shift = static_cast<uint8_t>(8 - bitIdx - bitDepth);
+    uint8_t mask = static_cast<uint8_t>((1u << bitDepth) - 1u);
+    uint16_t sample = static_cast<uint16_t>((row[byteIdx] >> shift) & mask);
+    bitIdx += bitDepth;
+    if (bitIdx == 8) {
+      bitIdx = 0;
+      byteIdx++;
+    }
+    return sample;
+  }
+
+  if (bitDepth == 8) {
+    if ((size_t)byteIdx >= row.size()) {
+      return {};
+    }
+    bitIdx = 0;
+    return static_cast<uint16_t>(row[byteIdx++]);
+  }
+
+  if (bitDepth == 16) {
+    if ((size_t)(byteIdx + 1) >= row.size()) {
+      return {};
+    }
+    bitIdx = 0;
+    uint16_t hi = static_cast<uint16_t>(row[byteIdx++]);
+    uint16_t lo = static_cast<uint16_t>(row[byteIdx++]);
+    return static_cast<uint16_t>((hi << 8) | lo);
+  }
+
+  return {};
+}
+
 std::optional<std::vector<uint8_t>> unfilter(const std::vector<uint8_t> &buff,
                                              const PngDecoder::Ihdr &header) {
   int rowBytes = ((header.width * header.bitsPerPixel + 7) / 8);
@@ -868,32 +931,84 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
     return false;
   }
   std::vector<uint8_t> unfiltered = maybeUnfiltered.value();
-  int p = 0;
+  int rowBytes = ((header.width * header.bitsPerPixel + 7) / 8);
   for (uint32_t x = 0; x < header.height; ++x) {
+    int rowStart = static_cast<int>(x) * rowBytes;
+    if (rowStart + rowBytes > (int)unfiltered.size()) {
+      return false;
+    }
+    std::vector<uint8_t> row(unfiltered.begin() + rowStart,
+                             unfiltered.begin() + rowStart + rowBytes);
+    int rowByteIdx = 0;
+    int rowBitIdx = 0;
     for (uint32_t y = 0; y < header.width; ++y) {
-      if (header.channels == 3) {
-        auto maybeR = readNextByte(unfiltered, p),
-             maybeG = readNextByte(unfiltered, p),
-             maybeB = readNextByte(unfiltered, p);
-        if (!maybeR.has_value() or !maybeG.has_value() or !maybeB.has_value()) {
+      uint8_t r = 0, g = 0, b = 0, a = 255;
+      if (header.colorType == 0) {
+        auto maybeGray =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        if (!maybeGray.has_value()) {
           return false;
         }
-        uint8_t r = maybeR.value(), g = maybeG.value(), b = maybeB.value();
-        int writeIdx = 4 * (x * header.width + y);
-        out.writePixelAtByteIndex(writeIdx, RGBA(b, g, r));
-      } else if (header.channels == 4) {
-        auto maybeR = readNextByte(unfiltered, p),
-             maybeG = readNextByte(unfiltered, p),
-             maybeB = readNextByte(unfiltered, p),
-             maybeA = readNextByte(unfiltered, p);
-        if (!maybeR.has_value() or !maybeG.has_value() or !maybeB.has_value() or
+        uint8_t gray = normalizeSampleTo8(maybeGray.value(), header.bitDepth);
+        r = gray;
+        g = gray;
+        b = gray;
+      } else if (header.colorType == 2) {
+        auto maybeR =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeG =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeB =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        if (!maybeR.has_value() || !maybeG.has_value() || !maybeB.has_value()) {
+          return false;
+        }
+        r = normalizeSampleTo8(maybeR.value(), header.bitDepth);
+        g = normalizeSampleTo8(maybeG.value(), header.bitDepth);
+        b = normalizeSampleTo8(maybeB.value(), header.bitDepth);
+      } else if (header.colorType == 4) {
+        auto maybeGray =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeA =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        if (!maybeGray.has_value() || !maybeA.has_value()) {
+          return false;
+        }
+        uint8_t gray = normalizeSampleTo8(maybeGray.value(), header.bitDepth);
+        r = gray;
+        g = gray;
+        b = gray;
+        a = normalizeSampleTo8(maybeA.value(), header.bitDepth);
+      } else if (header.colorType == 6) {
+        auto maybeR =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeG =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeB =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        auto maybeA =
+            readNextSampleMsb(row, header.bitDepth, rowByteIdx, rowBitIdx);
+        if (!maybeR.has_value() || !maybeG.has_value() || !maybeB.has_value() ||
             !maybeA.has_value()) {
           return false;
         }
-        uint8_t r = maybeR.value(), g = maybeG.value(), b = maybeB.value(), a = maybeA.value();
-        int writeIdx = 4 * (x * header.width + y);
-        out.writePixelAtByteIndex(writeIdx, RGBA(b, g, r, a));
+        r = normalizeSampleTo8(maybeR.value(), header.bitDepth);
+        g = normalizeSampleTo8(maybeG.value(), header.bitDepth);
+        b = normalizeSampleTo8(maybeB.value(), header.bitDepth);
+        a = normalizeSampleTo8(maybeA.value(), header.bitDepth);
+      } else if (header.colorType == 3) {
+        std::cerr << "Indexed color PNG not implemented yet...\n";
+        return false;
+      } else {
+        std::cerr << "Unsupported color type...\n";
+        return false;
       }
+
+      int writeIdx = 4 * (x * header.width + y);
+      if (writeIdx < 0) {
+        return false;
+      }
+      out.writePixelAtByteIndex(writeIdx, RGBA(b, g, r, a));
     }
   }
 
