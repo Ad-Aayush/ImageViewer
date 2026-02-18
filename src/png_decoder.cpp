@@ -1,6 +1,7 @@
 #include "png_decoder.h"
 #include "image.h"
 #include <array>
+#include <span>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -839,11 +840,20 @@ std::optional<std::vector<uint8_t>> unfilter(const std::vector<uint8_t> &buff,
   return unfiltered;
 }
 
+std::vector<RGBA> parsePlt(std::span<const uint8_t> buff) {
+  std::vector<RGBA> plt;
+  for (size_t i = 0; i < buff.size(); i+=3) {
+    plt.emplace_back(buff[i + 2], buff[i + 1], buff[i]);
+  }
+  return plt;
+}
+
 bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
   std::cout << "Found Png...\n";
   int idx = 8;
   Ihdr header;
   std::vector<uint8_t> encData;
+  std::vector<RGBA> palette;
 
   while (true) {
     std::cout << "\n";
@@ -875,6 +885,17 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
       for (uint32_t i = 0; i < len; ++i) {
         encData.push_back(buff[idx++]);
       }
+    } else if (chunkType == "PLTE") {
+      if (header.colorType == 0 or header.colorType == 4) {
+        std::cerr << "Unexpected PLTE chunk for this color type...\n";
+        return false;
+      }
+      if (len % 3 != 0) {
+        std::cerr << "PLTE Block must have length divisible by 3...\n";
+        return false;
+      }
+      std::span<const uint8_t> pltSpan(buff.begin() + idx, len);
+      palette = parsePlt(pltSpan);
     } else {
       idx += len;
     }

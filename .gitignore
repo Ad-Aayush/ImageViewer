@@ -9,3 +9,5 @@ src/xdg-shell-protocol.c
 src/xdg-shell-client-protocol.h
 pngsuite_min
 image.bmp
+.cache/
+compile_commands.json

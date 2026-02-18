@@ -10,7 +10,7 @@ XDG_SHELL_C = $(SRC_DIR)/xdg-shell-protocol.c
 XDG_SHELL_H = $(SRC_DIR)/xdg-shell-client-protocol.h
 
 CFLAGS = -g -Wall -Wextra -D_POSIX_C_SOURCE=200112L -I$(SRC_DIR)
-CXXFLAGS = -g -Wall -Wextra -std=c++17 -I$(SRC_DIR)
+CXXFLAGS = -g -Wall -Wextra -std=c++20 -I$(SRC_DIR)
 
 LIBS = -lwayland-client -lrt
 
