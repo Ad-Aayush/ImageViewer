@@ -15,6 +15,15 @@ struct RGBA {
 
 std::optional<uint32_t> readNextByte(const std::vector<uint8_t> &buff,
                                      int &buffIdx);
+std::optional<uint32_t>
+read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx);
+
+std::optional<std::string>
+read4BytesAsStr(const std::vector<uint8_t> &buff, int &idx);
+
+std::optional<uint32_t> readNextNbits(const std::vector<uint8_t> &buff, int N,
+                                      int &byteIdx, int &bitIdx);
+
 
 void pushRgbaToVec(std::vector<uint8_t> &pixels, const RGBA color);
 void writeBgrToIdx(std::vector<uint8_t> &pixels, const RGBA color, int32_t idx);

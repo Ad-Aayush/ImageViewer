@@ -1,15 +1,14 @@
 #include "png_decoder.h"
 #include "image.h"
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <span>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <iostream>
 #include <optional>
 #include <string>
-#include <sys/types.h>
 #include <vector>
 
 struct Trie {
@@ -82,94 +81,11 @@ bool PngDecoder::canDecode(const std::vector<uint8_t> &buff) const {
   if (buff.size() < 8) {
     return false;
   }
-  if (buff[0] != 0x89) {
-    return false;
+  std::span<const uint8_t> spn(buff.begin(), 8);
+  if (std::ranges::equal(spn, PNG_SIG)) {
+    return true;
   }
-  if (buff[1] != 0x50) {
-    return false;
-  }
-  if (buff[2] != 0x4E) {
-    return false;
-  }
-  if (buff[3] != 0x47) {
-    return false;
-  }
-  if (buff[4] != 0x0D) {
-    return false;
-  }
-  if (buff[5] != 0x0A) {
-    return false;
-  }
-  if (buff[6] != 0x1A) {
-    return false;
-  }
-  if (buff[7] != 0x0A) {
-    return false;
-  }
-  return true;
-}
-
-std::optional<uint32_t>
-PngDecoder::read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx) {
-  uint32_t ans = 0;
-  if (idx + 4 > (int)buff.size()) {
-    std::cerr << "Unexpected End of file...\n";
-    return {};
-  }
-
-  int cnt = 0;
-
-  while (cnt < 4) {
-    ans = (ans << 8) | (uint32_t)buff[idx++];
-    cnt++;
-  }
-
-  return ans;
-}
-
-std::optional<std::string>
-PngDecoder::read4BytesAsStr(const std::vector<uint8_t> &buff, int &idx) const {
-  std::string ans;
-  if (idx + 4 > (int)buff.size()) {
-    std::cerr << "Unexpected End of file...\n";
-    return {};
-  }
-
-  int cnt = 0;
-
-  while (cnt < 4) {
-    ans += (char)buff[idx++];
-    cnt++;
-  }
-
-  return ans;
-}
-
-std::optional<uint32_t> readNextNbits(const std::vector<uint8_t> &buff, int N,
-                                      int &byteIdx, int &bitIdx) {
-  if (N > 32) {
-    return {};
-  }
-  uint32_t out = 0;
-  int curr = 0;
-  while (curr < N) {
-    if (bitIdx == 8) {
-      bitIdx = 0;
-      byteIdx++;
-    }
-    if ((size_t)byteIdx >= buff.size()) {
-      return {};
-    }
-    uint8_t currByte = buff[byteIdx];
-    out ^= ((currByte >> bitIdx) & 1) << curr;
-    curr++;
-    bitIdx++;
-  }
-  if (bitIdx == 8) {
-    bitIdx = 0;
-    byteIdx++;
-  }
-  return out;
+  return false;
 }
 
 std::vector<uint16_t>
@@ -434,8 +350,6 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
                hclen = maybeHclen.value() + 4;
       // std::cout << "HLIT: " << hlit << ", HDIST: " << hdist
                 // << ", HCLEN: " << hclen << "\n";
-      std::vector<uint32_t> weirdOrder = {16, 17, 18, 0, 8,  7, 9,  6, 10, 5,
-                                          11, 4,  12, 3, 13, 2, 14, 1, 15};
       std::vector<uint8_t> clen_len(19);
       for (uint8_t i = 0; i < hclen; ++i) {
         auto maybeEntry = readNextNbits(enc, 3, idx, bitIdx);
@@ -443,7 +357,7 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
           return {};
         }
         uint8_t entry = maybeEntry.value();
-        clen_len[weirdOrder[i]] = entry;
+        clen_len[WEIRD_ORDER[i]] = entry;
       }
       Trie metaTrie = decoderFromBitLen(clen_len);
       uint16_t totalCodes = hlit + hdist;
@@ -638,7 +552,7 @@ std::optional<std::vector<uint8_t>> inflate(const std::vector<uint8_t> &enc) {
     s2 = (s2 + s1) % 65521;
   }
   uint32_t exp = (s2 << 16) | s1;
-  auto maybeAdl = PngDecoder::read4BytesAsU32(enc, idx);
+  auto maybeAdl = read4BytesAsU32(enc, idx);
   if (!maybeAdl.has_value()) {
     return {};
   }
@@ -945,7 +859,7 @@ bool PngDecoder::parsePng(const std::vector<uint8_t> &buff, Image &out) const {
     return {};
   }
   header.bitsPerPixel = header.channels * header.bitDepth;
-  uint16_t filterBpp = std::ceil(header.bitsPerPixel / 8.0);
+  uint16_t filterBpp = (header.bitsPerPixel + 7) / 8;
   std::cout << "Filter BPP: " << filterBpp << "\n";
   auto maybeUnfiltered = unfilter(inflated, header);
   if (!maybeUnfiltered.has_value()) {

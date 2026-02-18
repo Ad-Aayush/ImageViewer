@@ -67,3 +67,66 @@ std::optional<uint32_t> readNextByte(const std::vector<uint8_t> &buff,
 
   return byte;
 }
+
+std::optional<uint32_t>
+read4BytesAsU32(const std::vector<uint8_t> &buff, int &idx) {
+  uint32_t ans = 0;
+  if (idx + 4 > (int)buff.size()) {
+    std::cerr << "Unexpected End of file...\n";
+    return {};
+  }
+
+  int cnt = 0;
+
+  while (cnt < 4) {
+    ans = (ans << 8) | (uint32_t)buff[idx++];
+    cnt++;
+  }
+
+  return ans;
+}
+
+std::optional<std::string>
+read4BytesAsStr(const std::vector<uint8_t> &buff, int &idx) {
+  std::string ans;
+  if (idx + 4 > (int)buff.size()) {
+    std::cerr << "Unexpected End of file...\n";
+    return {};
+  }
+
+  int cnt = 0;
+
+  while (cnt < 4) {
+    ans += (char)buff[idx++];
+    cnt++;
+  }
+
+  return ans;
+}
+
+std::optional<uint32_t> readNextNbits(const std::vector<uint8_t> &buff, int N,
+                                      int &byteIdx, int &bitIdx) {
+  if (N > 32) {
+    return {};
+  }
+  uint32_t out = 0;
+  int curr = 0;
+  while (curr < N) {
+    if (bitIdx == 8) {
+      bitIdx = 0;
+      byteIdx++;
+    }
+    if ((size_t)byteIdx >= buff.size()) {
+      return {};
+    }
+    uint8_t currByte = buff[byteIdx];
+    out ^= ((currByte >> bitIdx) & 1) << curr;
+    curr++;
+    bitIdx++;
+  }
+  if (bitIdx == 8) {
+    bitIdx = 0;
+    byteIdx++;
+  }
+  return out;
+}
